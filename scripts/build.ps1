@@ -1,5 +1,5 @@
 # Builds MariaFreeDownload.exe + the Windows installer. Called by .github/workflows/build.yml
-param([string]$Version = "1.7.0")
+param([string]$Version = "1.9.1")
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
