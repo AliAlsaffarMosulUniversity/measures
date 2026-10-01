@@ -2,7 +2,7 @@
 ; Build:  ISCC.exe /DMyAppVersion=1.0.0 installer\jdm.iss
 
 #ifndef MyAppVersion
-  #define MyAppVersion "1.7.0"
+  #define MyAppVersion "1.9.1"
 #endif
 #define MyAppName "Maria Free Download"
 #define MyAppExe "MariaFreeDownload.exe"
