@@ -163,7 +163,8 @@ class RateLimiter:
 class Download:
     PERSIST = ("id", "url", "final_url", "save_dir", "filename", "temp_name", "size",
                "resumable", "segments", "status", "error", "connections", "headers",
-               "added", "finished", "path", "filename_locked", "kind", "quality")
+               "added", "finished", "path", "filename_locked", "kind", "quality",
+               "elapsed", "limit_kb")
 
     def __init__(self, engine, url, save_dir, filename=None, connections=8, headers=None):
         self.engine = engine
@@ -185,7 +186,15 @@ class Download:
         self.connections = max(1, min(32, int(connections)))
         self.headers = dict(headers or {})
         self.kind = "file"            # "file" or "video" (YouTube & other sites via yt-dlp)
+        # research instrumentation: "adaptive" (default) | "static" (never re-split)
+        self.split_policy = "adaptive"
+        self.stats = {"requests": 0, "splits": 0, "retries": 0, "worker_done": [],
+                      "t_start": None, "t_end": None}
         self.quality = "best"
+        self.elapsed = 0.0            # seconds actually spent downloading (pauses excluded)
+        self.limit_kb = 0             # per-file speed limit in KB/s, 0 = none
+        self.limiter = RateLimiter(0)
+        self._run_since = None
         self.added = time.time()
         self.finished = 0
         self.path = ""
@@ -215,6 +224,9 @@ class Download:
                 setattr(obj, k, d[k])
         if obj.status == DOWNLOADING:
             obj.status = QUEUED      # was running when the app closed -> continue
+        obj.elapsed = float(obj.elapsed or 0)
+        obj.limit_kb = int(obj.limit_kb or 0)
+        obj.limiter.set_rate(obj.limit_kb * 1024)
         return obj
 
     # ---- info
@@ -237,6 +249,16 @@ class Download:
             return min(100.0, self.downloaded * 100.0 / self.size)
         return 0.0
 
+    def elapsed_now(self):
+        """Total download time so far, counting the current run."""
+        since = self._run_since
+        return self.elapsed + (time.monotonic() - since if since else 0.0)
+
+    def set_limit_kb(self, kb):
+        self.limit_kb = max(0, int(kb))
+        self.limiter.set_rate(self.limit_kb * 1024)
+        self.engine.request_save()
+
     def eta(self):
         if self.size <= 0 or self.speed <= 1:
             return None
@@ -257,13 +279,14 @@ class Download:
 
     # ---- control
     def start(self):
+        self.stats["t_start"] = self.stats["t_start"] or time.monotonic()
         if self.is_running() or self.status == COMPLETED:
             return
         self._stop.clear()
         self._fatal = None
         self.error = ""
         self.status = DOWNLOADING
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(target=self._run_timed, daemon=True)
         self._thread.start()
 
     def stop(self, new_status=PAUSED):
@@ -305,6 +328,15 @@ class Download:
             r.close()
         self.temp_name = self.filename + TEMP_EXT
 
+    def _run_timed(self):
+        self._run_since = time.monotonic()
+        try:
+            self._run()
+        finally:
+            self.elapsed += time.monotonic() - self._run_since
+            self._run_since = None
+            self.engine.request_save()
+
     def _run(self):
         if self.kind == "video":
             return self._run_video()
@@ -335,6 +367,7 @@ class Download:
             self.filename = os.path.basename(final)
             self.status = COMPLETED
             self.finished = time.time()
+            self.stats["t_end"] = time.monotonic()
             self.speed = 0
         except Exception as e:  # noqa: BLE001
             if not self._stop.is_set():
@@ -404,6 +437,7 @@ class Download:
                 self.segments = [{"start": 0, "end": max(0, self.size - 1), "done": max(0, self.size)}]
             self.status = COMPLETED
             self.finished = time.time()
+            self.stats["t_end"] = time.monotonic()
         except DownloadCancelled:
             pass
         except Exception as e:  # noqa: BLE001
@@ -431,6 +465,7 @@ class Download:
                     if not chunk:
                         continue
                     self.engine.limiter.acquire(len(chunk))
+                    self.limiter.acquire(len(chunk))
                     f.write(chunk)
                     with self.lock:
                         seg["done"] += len(chunk)
@@ -475,7 +510,7 @@ class Download:
                 if pending:
                     self._spawn(pending[0], session)
                     continue
-                idx = self._split_largest()
+                idx = self._split_largest() if self.split_policy == "adaptive" else None
                 if idx is not None:
                     self._spawn(idx, session)
                     continue
@@ -506,6 +541,7 @@ class Download:
             new = {"start": mid, "end": best["end"], "done": 0}
             best["end"] = mid - 1
             self.segments.append(new)
+            self.stats["splits"] += 1
             return len(self.segments) - 1
 
     def _worker(self, idx, session):
@@ -517,8 +553,10 @@ class Download:
                     pos = seg["start"] + seg["done"]
                     end = seg["end"]
                 if pos > end:
+                    self.stats["worker_done"].append(time.monotonic())
                     return
                 try:
+                    self.stats["requests"] += 1
                     with session.get(self.final_url or self.url,
                                      headers={"Range": f"bytes={pos}-{end}"},
                                      stream=True, timeout=(15, 30)) as r:
@@ -532,6 +570,7 @@ class Download:
                                 if not chunk:
                                     continue
                                 self.engine.limiter.acquire(len(chunk))
+                                self.limiter.acquire(len(chunk))
                                 with self.lock:
                                     remaining = seg["end"] - (seg["start"] + seg["done"]) + 1
                                 data = chunk[:max(0, remaining)]
@@ -541,9 +580,11 @@ class Download:
                                         seg["done"] += len(data)
                                 retries = 0
                                 if len(data) < len(chunk):
+                                    self.stats["worker_done"].append(time.monotonic())
                                     return   # our part was shortened by a split
                 except (requests.RequestException, IOError, OSError) as e:
                     retries += 1
+                    self.stats["retries"] += 1
                     if retries > MAX_RETRIES:
                         self._fatal = str(e)
                         return
@@ -588,12 +629,14 @@ class Engine:
 
     # ---- api
     def add(self, url, save_dir=None, filename=None, connections=None, headers=None,
-            status=QUEUED, kind=None, quality="Best quality"):
+            status=QUEUED, kind=None, quality="Best quality", limit_kb=0):
         d = Download(self, url, save_dir or self.settings["download_dir"], filename,
                      connections or self.settings.get("connections", 8), headers)
         d.status = status
         d.kind = kind or ("video" if is_video_url(url) else "file")
         d.quality = quality
+        d.limit_kb = max(0, int(limit_kb or 0))
+        d.limiter.set_rate(d.limit_kb * 1024)
         if d.kind == "video" and not filename:
             d.filename = "Video (reading info…)"
         with self.lock:
@@ -626,9 +669,9 @@ class Engine:
                 opts["merge_output_format"] = "mp4"
         if deno:
             opts["js_runtimes"] = {"deno": {"path": deno}}
-        rate = self.limiter.rate
-        if rate > 0:
-            opts["ratelimit"] = rate
+        rates = [r for r in (self.limiter.rate, d.limiter.rate) if r > 0]
+        if rates:
+            opts["ratelimit"] = min(rates)
         return opts
 
     def get(self, did):
@@ -674,6 +717,7 @@ class Engine:
             d.segments = []
         d.temp_name = ""
         d.path = ""
+        d.elapsed = 0.0
         d.status = QUEUED
         self.request_save()
 

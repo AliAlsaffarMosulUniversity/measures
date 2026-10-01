@@ -3,6 +3,24 @@
 LANG = "en"
 
 AR = {
+    # elapsed time + speed limit (v1.9)
+    "Elapsed": "الوقت المستغرق",
+    "OK": "موافق",
+    "Total download time": "الوقت الكلي للتحميل",
+    "Time spent downloading so far": "الوقت المستغرق حتى الآن",
+    "Speed Limit": "تحديد السرعة",
+    "Speed limit: {v}": "حد السرعة: {v}",
+    "Speed limit for this file": "تحديد سرعة هذا الملف",
+    "Speed limit for this file…": "تحديد سرعة هذا الملف…",
+    "Speed limit for this file:": "حد سرعة هذا الملف:",
+    "Speed limit for this file: {v}": "حد سرعة هذا الملف: {v}",
+    "Speed limit (all downloads):": "حد السرعة (لكل التحميلات):",
+    "Maximum speed:": "أقصى سرعة:",
+    "Maximum total speed for all downloads together.": "أقصى سرعة لكل التحميلات معاً.",
+    "Only this file. The overall limit in Settings still applies.":
+        "لهذا الملف فقط. الحد العام في الإعدادات يبقى مطبَّقاً.",
+    "Click to change the speed limit": "انقر لتغيير حد السرعة",
+    "{n} files": "{n} ملفات",
     # toolbar / tray
     "Add URL": "إضافة رابط",
     "Resume": "استئناف",
@@ -67,6 +85,18 @@ AR = {
     "Audio only (M4A)": "صوت فقط (M4A)",
     # settings
     "Language:": "اللغة:",
+    "Measure": "قياس",
+    "Field measurement": "القياس الميداني",
+    "Connection code:": "رمز الاتصال:",
+    "Test file URL(s), one per line:": "رابط ملف الاختبار (رابط في كل سطر):",
+    "Repetitions:": "عدد التكرارات:",
+    "Note:": "ملاحظة:",
+    "e.g. 4G, 3 signal bars, home Wi-Fi": "مثلاً: 4G، ثلاث شرائط إشارة، واي فاي منزلي",
+    "Start measurement": "بدء القياس",
+    "Stop": "إيقاف",
+    "Open results folder": "فتح مجلد النتائج",
+    "Saved to": "حُفظت النتائج في",
+    "Pause other downloads and close streaming apps while measuring.": "أوقف التحميلات الأخرى وأغلق تطبيقات البث أثناء القياس.",
     "Theme:": "المظهر:",
     "Light (white)": "الوضع النهاري (أبيض)",
     "Dark (black)": "الوضع الليلي (أسود)",

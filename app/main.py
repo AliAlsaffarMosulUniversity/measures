@@ -10,18 +10,19 @@ from PySide6.QtGui import (QAction, QBrush, QColor, QDesktopServices, QFont, QGu
                            QKeySequence, QPainter, QPalette, QPen, QPixmap)
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox,
-    QFileDialog, QFormLayout, QFrame, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
-    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSpinBox,
-    QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTimeEdit, QToolBar,
+    QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QLineEdit,
+    QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QSpinBox,
+    QStyle, QSystemTrayIcon, QTableWidget, QTableWidgetItem, QTimeEdit, QToolBar, QToolButton,
     QVBoxLayout, QWidget)
 
 import bridge
 import engine as E
+import fieldbench
 import player
 from i18n import T, is_rtl, set_language
 
 APP_NAME = "Maria Free Download"
-VERSION = "1.7.0"
+VERSION = "1.9.1"
 CONTACT_EMAIL = "alsfarly2@gmail.com"
 COPYRIGHT_EN = "© 2026 Maria Free Download – All rights reserved – Mosul, Iraq"
 COPYRIGHT_AR = "© 2026 جميع الحقوق محفوظة – الموصل، العراق"
@@ -209,6 +210,11 @@ def media_icon(kind, color):
         from PySide6.QtCore import QPointF
         from PySide6.QtGui import QPolygonF
         p.drawPolygon(QPolygonF([QPointF(18, 10), QPointF(54, 32), QPointF(18, 54)]))
+    elif kind == "down":
+        from PySide6.QtCore import QPointF
+        from PySide6.QtGui import QPolygonF
+        p.drawRect(26, 8, 12, 26)
+        p.drawPolygon(QPolygonF([QPointF(12, 32), QPointF(52, 32), QPointF(32, 56)]))
     elif kind == "pause":
         p.drawRoundedRect(16, 12, 11, 40, 3, 3)
         p.drawRoundedRect(37, 12, 11, 40, 3, 3)
@@ -255,6 +261,85 @@ def iraq_flag(width=30, height=20):
     return pm.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
 
+# ---------------------------------------------------------------- speed limit
+def limit_raw(kb):
+    kb = int(kb or 0)
+    if kb >= 1024 and kb % 1024 == 0:
+        return f"{kb // 1024} MB/s"
+    if kb >= 1024:
+        return f"{kb / 1024:.1f} MB/s"
+    return f"{kb} KB/s"
+
+
+def fmt_limit(kb):
+    return T("Unlimited") if int(kb or 0) <= 0 else ltr(limit_raw(kb))
+
+
+class SpeedLimitEdit(QWidget):
+    """Number + unit (KB/s or MB/s). 0 = unlimited."""
+
+    def __init__(self, kb=0, parent=None):
+        super().__init__(parent)
+        self.num = QSpinBox()
+        self.num.setRange(0, 1_000_000)
+        self.num.setSpecialValueText(T("Unlimited"))
+        self.unit = QComboBox()
+        self.unit.addItem("KB/s", 1)
+        self.unit.addItem("MB/s", 1024)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.addWidget(self.num, 1)
+        lay.addWidget(self.unit)
+        self.setLayoutDirection(Qt.LeftToRight)
+        self.set_kb(kb)
+
+    def set_kb(self, kb):
+        kb = max(0, int(kb or 0))
+        if kb and kb % 1024 == 0:
+            self.unit.setCurrentIndex(1)
+            self.num.setValue(kb // 1024)
+        else:
+            self.unit.setCurrentIndex(0)
+            self.num.setValue(kb)
+
+    def kb(self):
+        return self.num.value() * int(self.unit.currentData())
+
+
+class SpeedLimitDialog(QDialog):
+    PRESETS = [0, 128, 256, 512, 1024, 2048, 5120, 10240]
+
+    def __init__(self, parent, title, kb, note=""):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setMinimumWidth(420)
+        lay = QVBoxLayout(self)
+        if note:
+            n = QLabel(note)
+            n.setWordWrap(True)
+            lay.addWidget(n)
+        grid = QGridLayout()
+        self.edit = SpeedLimitEdit(kb)
+        for i, p in enumerate(self.PRESETS):
+            b = QPushButton(fmt_limit(p))
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(lambda _=False, v=p: self.edit.set_kb(v))
+            grid.addWidget(b, i // 4, i % 4)
+        lay.addLayout(grid)
+        form = QFormLayout()
+        form.addRow(T("Maximum speed:"), self.edit)
+        lay.addLayout(form)
+        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        bb.button(QDialogButtonBox.Ok).setText(T("OK"))
+        bb.button(QDialogButtonBox.Cancel).setText(T("Cancel"))
+        bb.accepted.connect(self.accept)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
+
+    def kb(self):
+        return self.edit.kb()
+
+
 # ---------------------------------------------------------------- dialogs
 class AddDialog(QDialog):
     def __init__(self, parent, settings, url="", filename=""):
@@ -285,6 +370,9 @@ class AddDialog(QDialog):
         form.addRow(T("File name:"), self.name)
         form.addRow(T("Save to:"), row)
         form.addRow(T("Connections:"), self.conn)
+        self.limit = SpeedLimitEdit(0)
+        self.limit.setToolTip(T("Only this file. The overall limit in Settings still applies."))
+        form.addRow(T("Speed limit for this file:"), self.limit)
         form.addRow(self.quality_label, self.quality)
         form.addRow(self.video_hint)
         self.url.textChanged.connect(self._check_video)
@@ -357,11 +445,7 @@ class SettingsDialog(QDialog):
         self.maxc = QSpinBox()
         self.maxc.setRange(1, 10)
         self.maxc.setValue(int(s["max_concurrent"]))
-        self.limit = QSpinBox()
-        self.limit.setRange(0, 1_000_000)
-        self.limit.setSuffix(" KB/s")
-        self.limit.setSpecialValueText(T("Unlimited"))
-        self.limit.setValue(int(s["speed_limit_kb"]))
+        self.limit = SpeedLimitEdit(int(s["speed_limit_kb"]))
         self.ask = QCheckBox(T("Show 'Add Download' window for browser downloads"))
         self.ask.setChecked(bool(s["ask_on_browser_download"]))
         self.notify = QCheckBox(T("Notify when a download completes"))
@@ -374,7 +458,7 @@ class SettingsDialog(QDialog):
         form.addRow(T("Default folder:"), row)
         form.addRow(T("Connections per file:"), self.conn)
         form.addRow(T("Simultaneous downloads:"), self.maxc)
-        form.addRow(T("Speed limit:"), self.limit)
+        form.addRow(T("Speed limit (all downloads):"), self.limit)
         form.addRow(self.ask)
         form.addRow(self.notify)
         form.addRow(self.tray)
@@ -389,7 +473,7 @@ class SettingsDialog(QDialog):
         self.s["download_dir"] = self.folder.text().strip() or DEFAULTS["download_dir"]
         self.s["connections"] = self.conn.value()
         self.s["max_concurrent"] = self.maxc.value()
-        self.s["speed_limit_kb"] = self.limit.value()
+        self.s["speed_limit_kb"] = self.limit.kb()
         self.s["ask_on_browser_download"] = self.ask.isChecked()
         self.s["notify_on_complete"] = self.notify.isChecked()
         self.s["close_to_tray"] = self.tray.isChecked()
@@ -442,6 +526,97 @@ class SchedulerDialog(QDialog):
 
 
 # ---------------------------------------------------------------- small dialogs
+class MeasureDialog(QDialog):
+    """Research: field measurements for the segmentation study (results -> CSV)."""
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setWindowTitle(T("Field measurement"))
+        self.setMinimumSize(620, 560)
+        self.run = None
+        self.link = QComboBox()
+        self.link.setEditable(True)
+        for code in ("F1", "F2", "F3", "M1", "M2", "M3"):
+            self.link.addItem(code)
+        self.urls = QPlainTextEdit()
+        self.urls.setPlaceholderText("https://your-server/test-100MB.bin")
+        self.urls.setFixedHeight(70)
+        self.reps = QSpinBox()
+        self.reps.setRange(1, 10)
+        self.reps.setValue(3)
+        self.note = QLineEdit()
+        self.note.setPlaceholderText(T("e.g. 4G, 3 signal bars, home Wi-Fi"))
+        form = QFormLayout()
+        form.addRow(T("Connection code:"), self.link)
+        form.addRow(T("Test file URL(s), one per line:"), self.urls)
+        form.addRow(T("Repetitions:"), self.reps)
+        form.addRow(T("Note:"), self.note)
+        self.bar = QProgressBar()
+        self.bar.setRange(0, 1)
+        self.bar.setValue(0)
+        self.logbox = QPlainTextEdit()
+        self.logbox.setReadOnly(True)
+        self.start_btn = QPushButton(T("Start measurement"))
+        self.stop_btn = QPushButton(T("Stop"))
+        self.stop_btn.setEnabled(False)
+        folder = QPushButton(T("Open results folder"))
+        self.start_btn.clicked.connect(self.start)
+        self.stop_btn.clicked.connect(self.stop)
+        folder.clicked.connect(lambda: open_path(fieldbench.results_dir()))
+        row = QHBoxLayout()
+        row.addWidget(self.start_btn)
+        row.addWidget(self.stop_btn)
+        row.addStretch()
+        row.addWidget(folder)
+        hint = QLabel(T("Pause other downloads and close streaming apps while measuring."))
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: gray")
+        lay = QVBoxLayout(self)
+        lay.addLayout(form)
+        lay.addWidget(hint)
+        lay.addLayout(row)
+        lay.addWidget(self.bar)
+        lay.addWidget(self.logbox, 1)
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.poll)
+
+    def start(self):
+        urls = [u.strip() for u in self.urls.toPlainText().splitlines() if u.strip().lower().startswith("http")]
+        if not urls:
+            QMessageBox.warning(self, APP_NAME, T("Please enter a valid http:// or https:// URL."))
+            return
+        self.run = fieldbench.FieldRun(urls, self.link.currentText().strip() or "X", self.reps.value(),
+                                       self.note.text().strip())
+        self.bar.setRange(0, self.run.total)
+        self.bar.setValue(0)
+        self.logbox.appendPlainText(f"{T('Connection code:')} {self.run.link} · {fieldbench.time_slot()}")
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+        self.run.start()
+        self.timer.start(300)
+
+    def stop(self):
+        if self.run:
+            self.run.stop_flag.set()
+            self.stop_btn.setEnabled(False)
+
+    def poll(self):
+        while self.run and not self.run.events.empty():
+            ev = self.run.events.get_nowait()
+            if ev[0] == "log":
+                self.logbox.appendPlainText(ev[1])
+            elif ev[0] == "progress":
+                self.bar.setValue(ev[1])
+            elif ev[0] == "end":
+                self.timer.stop()
+                self.start_btn.setEnabled(True)
+                self.stop_btn.setEnabled(False)
+                self.logbox.appendPlainText(f"{T('Saved to')}: {ev[1]}")
+
+    def closeEvent(self, e):
+        self.stop()
+        super().closeEvent(e)
+
+
 class LanguageDialog(QDialog):
     """First run: choose Arabic or English."""
     def __init__(self):
@@ -476,8 +651,9 @@ class LanguageDialog(QDialog):
 
 
 # ---------------------------------------------------------------- main window
-COLS = ["File Name", "Size", "Progress", "Speed", "Time Left", "Status", "Connections", "Added", "Action"]
-C_NAME, C_SIZE, C_PROG, C_SPEED, C_ETA, C_STATUS, C_CONN, C_ADDED, C_ACTION = range(9)
+COLS = ["File Name", "Size", "Progress", "Speed", "Elapsed", "Time Left", "Status", "Connections",
+        "Added", "Action"]
+C_NAME, C_SIZE, C_PROG, C_SPEED, C_ELAPSED, C_ETA, C_STATUS, C_CONN, C_ADDED, C_ACTION = range(10)
 
 OPEN_BTN_CSS = ("QPushButton { background: #0e7490; color: white; border: none; border-radius: 5px; "
                 "padding: 2px 10px; font-weight: 600; } QPushButton:hover { background: #0c5f75; }")
@@ -503,7 +679,11 @@ class MainWindow(QMainWindow):
         self._build_central()
         self._build_tray()
         self.speed_label = QLabel()
-        self.limit_label = QLabel()
+        self.limit_label = QToolButton()
+        self.limit_label.setAutoRaise(True)
+        self.limit_label.setCursor(Qt.PointingHandCursor)
+        self.limit_label.setToolTip(T("Click to change the speed limit"))
+        self.limit_label.clicked.connect(self.global_limit_dialog)
         self.statusBar().addPermanentWidget(self.limit_label)
         self.statusBar().addPermanentWidget(self.speed_label)
 
@@ -544,10 +724,12 @@ class MainWindow(QMainWindow):
         act("Delete", QStyle.SP_TrashIcon, self.delete_selected, "Del")
         tb.addSeparator()
         act("Scheduler", QStyle.SP_BrowserReload, self.scheduler_dialog)
+        self.limit_action = act("Speed Limit", QStyle.SP_MediaSeekForward, self.global_limit_dialog)
         act("Settings", QStyle.SP_FileDialogDetailedView, self.settings_dialog)
         act("Open Folder", QStyle.SP_DirOpenIcon,
             lambda: open_path(self.settings["download_dir"]))
         act("Browser", QStyle.SP_ComputerIcon, self.extension_help)
+        act("Measure", QStyle.SP_FileDialogInfoView, lambda: MeasureDialog(self).exec())
         tb.addSeparator()
         self.theme_action = QAction(self)
         self.theme_action.triggered.connect(self.toggle_theme)
@@ -568,7 +750,7 @@ class MainWindow(QMainWindow):
         t.doubleClicked.connect(self._double_click)
         h = t.horizontalHeader()
         h.setSectionResizeMode(C_NAME, QHeaderView.Stretch)
-        for i, w in enumerate([0, 95, 160, 95, 90, 100, 90, 130, 90]):
+        for i, w in enumerate([0, 85, 140, 165, 95, 90, 100, 80, 125, 90]):
             if w:
                 t.setColumnWidth(i, w)
         self.table = t
@@ -699,7 +881,7 @@ class MainWindow(QMainWindow):
                             None if video else (dlg.name.text().strip() or None),
                             dlg.conn.value(), headers, status=dlg.choice,
                             kind="video" if video else "file",
-                            quality=dlg.quality.currentData())
+                            quality=dlg.quality.currentData(), limit_kb=dlg.limit.kb())
             self._refresh(full=True)
 
     def resume_selected(self):
@@ -716,6 +898,28 @@ class MainWindow(QMainWindow):
                 d.stop(E.SCHEDULED)
                 d.status = E.SCHEDULED
         self.engine.request_save()
+
+    def global_limit_dialog(self):
+        dlg = SpeedLimitDialog(self, T("Speed Limit"), self.settings["speed_limit_kb"],
+                               T("Maximum total speed for all downloads together."))
+        if dlg.exec() == QDialog.Accepted:
+            self.settings["speed_limit_kb"] = dlg.kb()
+            self.engine.set_speed_limit_kb(dlg.kb())
+            save_settings(self.settings)
+            self._flash(T("Speed limit: {v}", v=fmt_limit(dlg.kb())))
+            self._refresh()
+
+    def file_limit_dialog(self):
+        items = [d for d in self.selected() if d.status != E.COMPLETED]
+        if not items:
+            return
+        title = items[0].filename if len(items) == 1 else T("{n} files", n=len(items))
+        dlg = SpeedLimitDialog(self, T("Speed limit for this file"), items[0].limit_kb,
+                               f"{title}\n{T('Only this file. The overall limit in Settings still applies.')}")
+        if dlg.exec() == QDialog.Accepted:
+            for d in items:
+                d.set_limit_kb(dlg.kb())
+            self._refresh()
 
     def delete_selected(self):
         items = self.selected()
@@ -839,6 +1043,7 @@ class MainWindow(QMainWindow):
             m.addAction(T("Resume"), self.resume_selected)
             m.addAction(T("Pause"), self.pause_selected)
             m.addAction(T("Move to Schedule"), self.schedule_selected)
+            m.addAction(T("Speed limit for this file…"), self.file_limit_dialog)
             m.addAction(T("Open Folder"), lambda: open_path(d.save_dir))
         m.addAction(T("Copy URL"), lambda: QGuiApplication.clipboard().setText(d.url))
         if d.error:
@@ -914,7 +1119,7 @@ class MainWindow(QMainWindow):
                         self.table.removeCellWidget(r, c)
                     else:
                         it = QTableWidgetItem()
-                        if c in (C_SIZE, C_SPEED, C_ETA, C_CONN):
+                        if c in (C_SIZE, C_SPEED, C_ELAPSED, C_ETA, C_CONN):
                             it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
                         self.table.setItem(r, c, it)
             self._rows = ids
@@ -929,7 +1134,12 @@ class MainWindow(QMainWindow):
                     E.SCHEDULED: QStyle.SP_BrowserReload}.get(d.status, QStyle.SP_FileIcon)
             it = self.table.item(r, C_NAME)
             it.setText(d.filename)
-            it.setIcon(st.standardIcon(icon))
+            if d.status in (E.DOWNLOADING, E.PAUSED):
+                col = "#22a6c3" if d.status == E.DOWNLOADING else (
+                    "#e6e8eb" if self.settings.get("theme") == "dark" else "#1f2937")
+                it.setIcon(media_icon("down" if d.status == E.DOWNLOADING else "pause", col))
+            else:
+                it.setIcon(st.standardIcon(icon))
             it.setToolTip(d.url + (f"\n\n{T('Error')}: {d.error}" if d.error else ""))
             self.table.item(r, C_SIZE).setText(T("Unknown") if d.size is None or d.size < 0
                                                else ltr(E.human_size(d.size)))
@@ -937,8 +1147,21 @@ class MainWindow(QMainWindow):
             p = d.progress()
             bar.setValue(int(p * 10))
             bar.setFormat(ltr(f"{p:.1f}%" if d.size > 0 else E.human_size(d.downloaded)))
-            self.table.item(r, C_SPEED).setText(ltr(E.human_size(d.speed) + "/s") if running else "")
-            self.table.item(r, C_ETA).setText(ltr(E.human_time(d.eta())) if running else "")
+            sp = self.table.item(r, C_SPEED)
+            txt = E.human_size(d.speed) + "/s" if running else ""
+            if d.limit_kb and d.status != E.COMPLETED:
+                txt = (txt + " / " if txt else "≤ ") + limit_raw(d.limit_kb)
+            sp.setText(ltr(txt) if txt else "")
+            sp.setToolTip(T("Speed limit for this file: {v}", v=fmt_limit(d.limit_kb)))
+            el = d.elapsed_now()
+            self.table.item(r, C_ELAPSED).setText(ltr(E.human_time(el)) if el >= 1 else "")
+            self.table.item(r, C_ELAPSED).setToolTip(
+                T("Total download time") if d.status == E.COMPLETED else T("Time spent downloading so far"))
+            if running:
+                eta = E.human_time(d.eta())
+                self.table.item(r, C_ETA).setText(ltr(eta) if eta else "…")
+            else:
+                self.table.item(r, C_ETA).setText("")
             self.table.item(r, C_STATUS).setText(T(d.status))
             self.table.item(r, C_CONN).setText(str(d.live_connections) if running else "")
             self.table.item(r, C_ADDED).setText(
@@ -961,7 +1184,7 @@ class MainWindow(QMainWindow):
         active = sum(1 for d in items if d.status == E.DOWNLOADING)
         self.speed_label.setText(f"  {T('{n} active', n=active)}  |  {ltr(E.human_size(total) + '/s')}  ")
         lim = self.settings["speed_limit_kb"]
-        self.limit_label.setText(T("Limit: {n} KB/s", n=lim) if lim else T("No speed limit"))
+        self.limit_label.setText(T("Speed limit: {v}", v=fmt_limit(lim)) if lim else T("No speed limit"))
 
     # ---- window lifecycle
     def closeEvent(self, ev):
